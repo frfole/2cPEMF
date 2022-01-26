@@ -1,248 +1,232 @@
-#include "U8g2lib.h"
+#include <U8x8lib.h>
 #include <Encoder.h>
 #include <EEPROM.h>
 #define ENCODER_USE_INTERRUPTS
 
-//EC12E rotator
-Encoder ec12e(5, 6);   //EC12E
-long ec12eP0 = 0;      //EC12E last value
-long ec12eP1 = 0;      //EC12E current value
+// oled
+U8X8_SH1106_128X64_NONAME_HW_I2C oled;
 
-//Oled display
-U8G2_SH1106_128X64_NONAME_1_HW_I2C u8g(U8G2_R0);
-
-//Button
-const byte bPin = 3;   //EC12E button
-
-//output
-const byte a0Out = 7;  //a0
-const byte a1Out = 8;  //a1
-const byte b0Out = 9;  //b0
-const byte b1Out = 10; //b1
-boolean isRunning = false;
-
-//Piezo
+// Piezo
 const byte pPin = A1;  //piezo pin
 
-//values
-long vHz0 = 1;
-long vHz1 = 1;
-long vLen = 1;
+// encoder
+Encoder encoder(5, 6);
+const byte bPin = 3;   //EC12E button
+long encoderVal0 = 0, encoderVal1 = 0;
+
+// values
+unsigned long waveTEnd = 0;
+uint8_t vF0 = 1, vF1 = 1, vT = 1;
 int select = 0;
-bool egg = 0;
-bool waveDetails = 0;
-//0 -> f
-//1 -> t
-//2 -> out
-//3 -> start
+boolean isRunning = false, needDraw = true, waveDetails = false;
 
 void setup() {
-  //Serial setup
   Serial.begin(115200);
-  //pin setup
-  pinMode(bPin, INPUT);
+  oled.begin();
+  oled.setFont(u8x8_font_chroma48medium8_r);
+  loadE();
+
   for(int i = 7; i < 11; i++)
     pinMode(i, OUTPUT);
-  attachInterrupt(digitalPinToInterrupt(bPin), bAction, RISING);
-  //display setup
-  u8g.begin();
-  //load and draw
-  loadE();
-  delay(100);
-  draw();
-  Serial.println("2cPEMF|setup| setup done");
+  pinMode(bPin, INPUT);
 }
 
-long loopDN = 0;
-bool loopSD = 0;
 void loop() {
-  ec12eP1 = ec12e.read();
-  if (ec12eP0 != ec12eP1 && ec12eP1%4==0) {
-    ec12eM();
-    ec12eP0 = ec12eP1 = 0;
-    ec12e.write(0);
-  }
-  if(isRunning) wave();
-  if(loopDN < millis() && loopSD) {
+  if (isRunning) {
+    wave();
+  } else {
     draw();
-    loopDN = millis()+500;
-    loopSD = 0;
+    bAction();
+    encoderVal1 = encoder.read();
+    if (encoderVal0 != encoderVal1 && encoderVal1%4==0) {
+      ec12eM();
+      encoderVal0 = encoderVal1 = 0;
+      encoder.write(0);
+    }
   }
+}
+
+void wave() {
+  bool loAE = vF0 > 0;
+  bool loBE = vF1 > 0;
+  long loAHz = loAE ? (100000 / vF0) : -1;
+  long loBHz = loBE ? (100000 / vF1) : -1;
+  unsigned long millisCur = millis(), loND = millisCur;
+  long waveAt = 0, waveBt = 0, microsCur;
+  uint8_t waveAs = 0, waveBs = 0;
+  waveTEnd = millisCur + vT*60000;
+  tone(pPin, 1000);
+  delay(1000);
+  noTone(pPin);
+  oled.clear();
+  for (uint8_t i = 7; i < 11; i++) digitalWrite(i, 0);
+  while(isRunning) {
+    microsCur = micros();
+    millisCur = millis();
+    if(loAE && waveAt < microsCur) {
+      switch(waveAs) {
+        case 0: digitalWrite(7, 1); waveAt = microsCur + loAHz*3; waveAs++; break;
+        case 1: digitalWrite(7, 0); waveAt = microsCur + loAHz*2; waveAs++; break;
+        case 2: digitalWrite(8, 1); waveAt = microsCur + loAHz*3; waveAs++; break;
+        case 3: digitalWrite(8, 0); waveAt = microsCur + loAHz*2; waveAs=0; break;
+      }
+    }
+    if(loBE && waveBt < microsCur) {
+      switch(waveBs) {
+        case 0: digitalWrite(9, 1); waveBt = microsCur + loBHz*3; waveBs++; break;
+        case 1: digitalWrite(9, 0); waveBt = microsCur + loBHz*2; waveBs++; break;
+        case 2: digitalWrite(10, 1); waveBt = microsCur + loBHz*3; waveBs++; break;
+        case 3: digitalWrite(10, 0); waveBt = microsCur + loBHz*2; waveBs=0; break;
+      }
+    }
+    if (loND < millisCur) {
+      needDraw = true;
+      draw();
+      loND = millisCur + 1000;
+    }
+    if (waveTEnd < millisCur) {
+      isRunning = false;
+    }
+    bAction();
+    encoderVal1 = encoder.read();
+    if (encoderVal0 != encoderVal1 && encoderVal1%4==0) {
+      waveDetails = !waveDetails;
+      encoderVal0 = encoderVal1 = 0;
+      encoder.write(0);
+      needDraw = true;
+      oled.clear();
+      draw();
+    }
+  }
+  for(int i = 7; i < 11; i++)
+    digitalWrite(i, 0);
+  for (uint8_t i = 0; i < 3; i++) {
+    tone(pPin, 1000);
+    delay(1000);
+    noTone(pPin);
+    delay(500);
+  }
+  oled.clear();
+  needDraw = true;
+  draw();
 }
 
 void ec12eM() {
-  bool rot = ec12eP0 > ec12eP1; // 1 -> c; 0 -> cw
+  bool rot = encoderVal0 > encoderVal1; // 1 -> c; 0 -> cw
   if(!isRunning) {
     if(rot) {
       switch(select) {
-        case 0: vHz0++; if(vHz0>99) vHz0=0; break;
-        case 1: vHz1++; if(vHz1>99) vHz1=0; break;
-        case 2: vLen++; if(vLen>30) vLen=1; break;
-        case 3: egg = !egg; break;
+        case 0: vF0++; if(vF0>99) vF0=0; break;
+        case 1: vF1++; if(vF1>99) vF1=0; break;
+        case 2: vT++; if(vT>30) vT=1; break;
       }
     } else {
       switch(select) {
-        case 0: vHz0--; if(vHz0<0) vHz0=99; break;
-        case 1: vHz1--; if(vHz1<0) vHz1=99; break;
-        case 2: vLen--; if(vLen<1) vLen=30; break;
-        case 3: egg = !egg; break;
+        case 0: vF0--; if(vF0<0) vF0=99; break;
+        case 1: vF1--; if(vF1<0) vF1=99; break;
+        case 2: vT--; if(vT<1) vT=30; break;
       }
     }
-    loopSD = 1;
     saveE();
+    needDraw = true;
   }
 }
 
 //Button action
 long bActionLast = 0;
+uint8_t btnLastState = 1;
 void bAction() {
-  if(bActionLast < millis()) {
-    Serial.println("bAction");  
+  uint8_t btnCurState = digitalRead(bPin);
+  if(btnCurState != btnLastState && btnCurState == 1 && bActionLast < millis()) {
     if(!isRunning) {
       select++;
-      loopSD = 1;
-      if(select==4 && !egg){isRunning = true; select=0;}
-      else if(select==4 && egg) {select=0; egg = 0;}
-    }
-    else {isRunning = false;}
-    bActionLast = millis()+500;
-  }
-}
-
-//Wave
-long waveTEnd = 0;
-long waveAt = 0;
-byte waveAs = 0;
-long waveBt = 0;
-byte waveBs = 0;
-void wave() {
-  long cycle = 0;
-  bool loAE = vHz0 > 0;
-  bool loBE = vHz1 > 0;
-  long loAHz = loAE ? (1000000/vHz0/10) : -1;
-  long loBHz = loBE ? (1000000/vHz1/10) : -1;
-  long loND = millis();
-  waveTEnd = millis()+vLen*60*1000;
-  tone(pPin, 1000);
-  delay(1000);
-  noTone(pPin);
-  while(isRunning) {
-    if(waveAt < micros() && loAE) {
-      switch(waveAs) {
-        case 0: digitalWrite(a0Out, 1); digitalWrite(a1Out, 0); waveAt = micros()+loAHz*3; waveAs++; break;
-        case 1: digitalWrite(a0Out, 0); digitalWrite(a1Out, 0); waveAt = micros()+loAHz*2; waveAs++; break;
-        case 2: digitalWrite(a0Out, 0); digitalWrite(a1Out, 1); waveAt = micros()+loAHz*3; waveAs++; break;
-        case 3: digitalWrite(a0Out, 0); digitalWrite(a1Out, 0); waveAt = micros()+loAHz*2; waveAs=0; break;
+      if(select == 4) {
+        isRunning = true;
+        select = 0;
       }
-    }
-    if(waveBt < micros() && loBE) {
-      switch(waveBs) {
-        case 0: digitalWrite(b0Out, 1); digitalWrite(b1Out, 0); waveBt = micros()+loBHz*3; waveBs++; break;
-        case 1: digitalWrite(b0Out, 0); digitalWrite(b1Out, 0); waveBt = micros()+loBHz*2; waveBs++; break;
-        case 2: digitalWrite(b0Out, 0); digitalWrite(b1Out, 1); waveBt = micros()+loBHz*3; waveBs++; break;
-        case 3: digitalWrite(b0Out, 0); digitalWrite(b1Out, 0); waveBt = micros()+loBHz*2; waveBs=0; break;
-      }
-    }
-    if(loND < millis()) {
-      draw();
-      loND = millis()+1000*10;
-    }
-    if(waveTEnd < millis()) {
+    } else {
       isRunning = false;
     }
-    ec12eP1 = ec12e.read();
-    if (ec12eP0 != ec12eP1 && ec12eP1%4==0) {
-      waveDetails = !waveDetails;
-      ec12eP0 = ec12eP1 = 0;
-      ec12e.write(0);
-      draw();
-    }
-    cycle++;
+    bActionLast = millis() + 300;
+    needDraw = 1;
   }
-  for(int i = 7; i < 11; i++)
-    digitalWrite(i, 0);
-  tone(pPin, 1000);
-  delay(1000);
-  noTone(pPin);
-  delay(500);
-  tone(pPin, 1000);
-  delay(1000);
-  noTone(pPin);
-  delay(500);
-  tone(pPin, 1000);
-  delay(1000);
-  noTone(pPin);
-  delay(500);
-  draw();
+  btnLastState = btnCurState;
 }
 
-//Draw
-static unsigned char drawImage0[] = {0x08,0x0f,0xe1,0x44,0x88,0x04,0x91,0x12,0x25,0x90,0x02,0x91,0x12,0x14,0xa0,0x7f,0x8f,0x12,0x0c,0xff,0x02,0x51,0x14,0x14,0xa0,0x04,0xd1,0x17,0x25,0x90,0x08,0x4f,0xe4,0x44,0x88};
-static unsigned char drawImage1[] = {0x02,0xf4,0x03,0xfc,0x38,0xf3,0x99,0xf9,0x98,0xf1,0xc9,0xf9,0x98,0xf1,0xbd,0xf9,0xd8,0xf0,0x95,0xf9,0x03,0xfc,0x02,0xf4};
-long drawLast = 0;
+uint8_t tiles[11][8] = {
+  {90, 90, 90, 90, 90, 90, 90, 90},
+  {90, 90, 90, 90, 90, 90, 90, 66},
+  {90, 90, 90, 90, 90, 90, 66, 66},
+  {90, 90, 90, 90, 90, 66, 66, 66},
+  {90, 90, 90, 90, 66, 66, 66, 66},
+  {90, 90, 90, 66, 66, 66, 66, 66},
+  {90, 90, 66, 66, 66, 66, 66, 66},
+  {90, 66, 66, 66, 66, 66, 66, 66},
+  {66, 126, 0, 0, 0, 0, 0, 0},
+  {0, 0, 0, 0, 0, 0, 126, 66},
+  {66, 66, 66, 66, 66, 66, 66, 66}
+};
+
 void draw() {
-  if(drawLast < millis()) {
-    u8g.firstPage();
-    do {
-      u8g.setFont(u8g_font_9x18);
-      u8g.setFontRefHeightExtendedText();
-      u8g.setFontPosTop();
-      if(!isRunning && !egg) {
-        u8g.setCursor(10, 1); u8g.print("ch 0: "+(vHz0>0?val22(vHz0)+" Hz":"off"));
-        u8g.setCursor(10,17); u8g.print("ch 1: "+(vHz1>0?val22(vHz1)+" Hz":"off"));
-        u8g.setCursor(10,33); u8g.print("   t: "+val22(vLen)+" min");
-        u8g.setCursor(10,49); u8g.print("START");
-        if(select < 4){u8g.drawFrame(4, select*16, 122, 16);}
-      } else if(!isRunning && select==3 && egg) {
-        u8g.setCursor(10, 0); u8g.print("github.com/");
-        u8g.setCursor(10,16); u8g.print("frfole/2cPEMF");
-        u8g.drawLine(0,32,127,32);
-        u8g.setCursor(10,37); u8g.print("23.7.2k20");
-        u8g.drawXBM(44,54,39,7,drawImage0);
-        u8g.drawXBM(116,52,12,12,drawImage1);
-      } else if(isRunning && !waveDetails) {
-        u8g.setCursor(10,1); u8g.print(" Press");
-        u8g.setCursor(10,17); u8g.print("to stop");
-        u8g.setCursor(10,40); u8g.print("t-: "+String((waveTEnd-millis())/1000/60)+" min");
-        u8g.drawFrame(12,56,104,5);
-        u8g.drawLine(14,58,100-((waveTEnd-millis())*100/(vLen*60*1000))+14,58);
-      } else if(isRunning && waveDetails) {
-        u8g.setCursor(10, 1); u8g.print("ch 0: "+(vHz0>0?val22(vHz0)+" Hz":"off"));
-        u8g.setCursor(10,17); u8g.print("ch 1: "+(vHz1>0?val22(vHz1)+" Hz":"off"));
-        u8g.setCursor(10,33); u8g.print("   t: "+val22(vLen)+" min");
+  if (!needDraw) return;
+  needDraw = false;
+  if (!isRunning || (isRunning && waveDetails)) {
+    oled.setCursor(0, 0);
+    oled.print("ch 0: ");
+    if (vF0 > 0) {
+      oled.print(vF0);
+      oled.print(" Hz ");
+    } else oled.print("off  ");
+    oled.setCursor(0, 1);
+    oled.print("ch 1: ");
+    if (vF1 > 0) {
+      oled.print(vF1);
+      oled.print(" Hz ");
+    } else oled.print("off  ");
+    oled.setCursor(3, 2);
+    oled.print("t: ");
+    oled.print(vT);
+    oled.print(" min ");
+    if (!isRunning) {
+      oled.setCursor(5, 3);
+      oled.print("START");
+      for (uint8_t i = 0; i < 4; i++) {
+        oled.setCursor(13, i);
+        if (i == select) oled.print("<");
+        else oled.print(" ");
       }
-    } while(u8g.nextPage());
-    Serial.println("2cPEMF|draw| drawing");
-    drawLast = millis()+250;
+    }
+  } else {
+    oled.setCursor(2, 0);
+    oled.print("Press to stop");
+    oled.setCursor(0, 1);
+    oled.print("t-: ");
+    oled.print((waveTEnd - millis()) / 60000);
+    oled.print(" min ");
+    oled.drawTile(0, 3, 1, tiles[9]);
+    oled.drawTile(15, 3, 1, tiles[8]);
+    uint8_t i = 0;
+    for (i = 0; i < ((waveTEnd - millis()) * 14) / (vT*60000); i++) oled.drawTile(1 + i, 3, 1, tiles[0]);
+    oled.drawTile(1 + i, 3, 1, tiles[7 - (((waveTEnd - millis()) * 112) / (vT*60000) % 8)]);
+    for (i = i + 2; i < 15; i++) oled.drawTile(i, 3, 1, tiles[10]);
   }
 }
 
 //save & load
-struct LastSet {
-  long freq0;
-  long freq1;
-  long t;
-};
 void saveE() {
-  LastSet a = {vHz0, vHz1, vLen};
-  EEPROM.put(0, a);
+  EEPROM.update(0, vF0);
+  EEPROM.update(1, vF1);
+  EEPROM.update(2, vT);
 }
 void loadE() {
-  LastSet a;
-  EEPROM.get(0, a);
-  vHz0 = a.freq0;
-  vHz1 = a.freq1;
-  vLen = a.t;
-  if(vHz0<0) vHz0 = 0;
-  if(vHz0>99) vHz0 = 99;
-  if(vHz1<0) vHz1 = 0;
-  if(vHz1>99) vHz1 = 99;
-  if(vLen<1) vLen = 1;
-  if(vLen>30) vLen = 30;
-}
-
-//utils
-String val22(long i) {
-  if( i >= 0 && i < 10) return "0"+String(i);
-  return String(i);
+  EEPROM.get(0, vF0);
+  EEPROM.get(1, vF1);
+  EEPROM.get(2, vT);
+  
+  if(vF0 < 0) vF0 = 0;
+  else if(vF0 > 99) vF0 = 99;
+  if(vF1 < 0) vF1 = 0;
+  else if(vF1 > 99) vF1 = 99;
+  if(vT < 1) vT = 1;
+  else if(vT > 30) vT = 30;
 }
